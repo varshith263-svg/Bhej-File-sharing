@@ -1,0 +1,78 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'username', 'searchId', 'createdAt']) &&
+        data.uid == request.auth.uid &&
+        data.name is string && data.name.size() <= 100 &&
+        data.email is string && data.email.size() <= 200 &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+        data.username is string && data.username.size() <= 50 &&
+        data.searchId is string && data.searchId.size() <= 10 &&
+        data.createdAt == request.time;
+    }
+
+    function isValidUpdateUser(data) {
+      return data.uid == request.auth.uid &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 100)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+        (!('username' in data) || (data.username is string && data.username.size() <= 50)) &&
+        (!('searchId' in data) || (data.searchId is string && data.searchId.size() <= 10));
+    }
+
+    function isValidTransfer(data) {
+      return data.keys().hasAll(['id', 'senderId', 'senderName', 'receiverId', 'fileId', 'fileName', 'fileSize', 'downloadUrl', 'status', 'createdAt']) &&
+        data.id is string && data.id.size() <= 100 &&
+        data.senderId == request.auth.uid &&
+        data.senderName is string && data.senderName.size() <= 100 &&
+        data.receiverId is string && data.receiverId.size() <= 128 &&
+        data.fileId is string && data.fileId.size() <= 256 &&
+        data.fileName is string && data.fileName.size() <= 256 &&
+        data.fileSize is number &&
+        data.downloadUrl is string && data.downloadUrl.size() <= 2048 &&
+        data.status is string && data.status in ['pending', 'accepted', 'rejected', 'completed', 'cancelled'] &&
+        data.createdAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn(); // We allow searching users by exact matches or recent
+      
+      allow create: if isSignedIn() && isValidId(userId) && userId == request.auth.uid && isValidUser(incoming());
+      allow update: if isSignedIn() && isValidId(userId) && existing().uid == request.auth.uid && isValidUpdateUser(incoming()) && incoming().createdAt == existing().createdAt && incoming().uid == existing().uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'photoURL', 'username', 'searchId', 'email']);
+    }
+
+    match /transfers/{transferId} {
+      allow get: if isSignedIn() && (existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid);
+      allow list: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.receiverId == request.auth.uid);
+
+      allow create: if isSignedIn() && isValidId(transferId) && incoming().senderId == request.auth.uid && isValidTransfer(incoming()) && exists(/databases/$(database)/documents/users/$(incoming().receiverId));
+      allow update: if isSignedIn() && isValidId(transferId) && (
+        (existing().senderId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status']) && incoming().status in ['cancelled', 'completed']) ||
+        (existing().receiverId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status']) && incoming().status in ['accepted', 'rejected', 'completed'])
+      ) && incoming().senderId == existing().senderId && incoming().receiverId == existing().receiverId && incoming().createdAt == existing().createdAt;
+    }
+  }
+}
